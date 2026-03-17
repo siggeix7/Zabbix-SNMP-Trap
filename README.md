@@ -55,7 +55,11 @@ Se il link diretto non dovesse più funzionare nel tempo, ecco come trovare la v
 ### Opzione B: Download diretto per Zabbix 7.0
 Usa questo comando per scaricarlo direttamente in `/usr/bin/`:
 ```bash
+# Dal repo di zabbix
 sudo wget https://git.zabbix.com/projects/ZBX/repos/zabbix/raw/misc/snmptrap/zabbix_trap_receiver.pl?at=refs%2Fheads%2Frelease%2F7.0 -O /usr/bin/zabbix_trap_receiver.pl
+
+# Da questo repository (versione 7.0 scaricato il 17 marzo 2026)
+sudo wget https://raw.githubusercontent.com/siggeix7/Zabbix-SNMP-Trap/refs/heads/main/zabbix_trap_receiver.pl -O /usr/bin/zabbix_trap_receiver.pl
 
 # Rendilo eseguibile
 sudo chmod +x /usr/bin/zabbix_trap_receiver.pl
