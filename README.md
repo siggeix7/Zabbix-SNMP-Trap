@@ -1,143 +1,210 @@
-Ecco come funziona il flusso:
-**Dispositivo di rete** invia la trap -> **snmptrapd** (demone) la riceve sulla porta 162 UDP -> **snmptrapd** passa la trap allo **script Perl** -> Lo script formatta la trap e la scrive in un **file di testo** -> **Zabbix Server** legge il file e assegna la trap al corretto Host/Item.
+# 📡 Guida Completa: Ricezione SNMP Traps su Zabbix 7.0 (via Perl Script)
 
-Di seguito trovi la guida completa passo-passo per **Zabbix 7.0**.
+Questa guida illustra passo dopo passo come configurare un server Zabbix 7.0 per ricevere, processare e associare le Trap SNMP provenienti dai dispositivi di rete, utilizzando lo script Perl ufficiale di Zabbix.
+
+## 🏗️ Architettura del flusso
+Comprendere come viaggia l'informazione è fondamentale per il troubleshooting:
+1. **Dispositivo di Rete** genera una Trap SNMP e la invia via rete (UDP/162).
+2. Il demone **`snmptrapd`** (in esecuzione sul server Zabbix) riceve la trap.
+3. **`snmptrapd`** la passa allo script **`zabbix_trap_receiver.pl`**.
+4. Lo script formatta i dati e li appende a un **file di testo** (es. `/var/log/zabbix/zabbix_traps.tmp`).
+5. **Zabbix Server** (processo *SNMP trapper*) monitora costantemente questo file, legge le nuove trap e le associa agli Host corretti nel database tramite l'IP di origine.
 
 ---
 
-### Passo 1: Installare i pacchetti necessari
+## 🛠️ Prerequisiti
+* Server con Zabbix 7.0 installato e funzionante.
+* Accesso root o privilegi `sudo`.
+* Connettività di rete dai dispositivi al server Zabbix sulla porta **162 UDP**.
 
-Per prima cosa, devi installare il demone per le trap SNMP (`snmptrapd`) e il modulo Perl necessario per far comunicare il demone con lo script. Esegui i comandi in base al sistema operativo del tuo Zabbix Server.
+---
 
-**Per Ubuntu/Debian:**
+## Passo 1: Installazione delle dipendenze
+
+Dobbiamo installare il demone `snmptrapd`, gli strumenti SNMP e i moduli Perl necessari.
+Si consiglia di installare anche i pacchetti dei MIB per permettere al server di tradurre gli OID numerici in nomi testuali comprensibili.
+
+**Ubuntu / Debian:**
 ```bash
 sudo apt update
-sudo apt install snmp snmpd snmptrapd libsnmp-perl
+sudo apt install snmp snmpd snmptrapd libsnmp-perl snmp-mibs-downloader
+# Abilita l'uso dei MIB testuali commentando la riga "mibs :"
+sudo sed -i 's/^mibs :/#mibs :/g' /etc/snmp/snmp.conf
 ```
 
-**Per RHEL/Rocky Linux/AlmaLinux:**
+**RHEL / Rocky Linux / AlmaLinux:**
 ```bash
 sudo dnf install net-snmp net-snmp-utils net-snmp-perl
 ```
 
 ---
 
-### Passo 2: Scaricare lo script Perl ufficiale di Zabbix 7.0
+## Passo 2: Recuperare lo Script Perl di Zabbix
 
-Scarica lo script direttamente dal repository Git ufficiale di Zabbix (ramo 7.0) e posizionalo in una cartella di sistema.
+Lo script ufficiale è `zabbix_trap_receiver.pl`. Zabbix lo aggiorna periodicamente e il link diretto potrebbe cambiare. 
 
+### Opzione A: Come trovare lo script manualmente (Metodo raccomandato)
+Se il link diretto non dovesse più funzionare nel tempo, ecco come trovare la versione corretta:
+1. Vai sul repository Git ufficiale: [https://git.zabbix.com](https://git.zabbix.com)
+2. Naviga in **Zabbix** -> **Zabbix** (il progetto principale).
+3. Nel menu a tendina in alto a sinistra (Branch/Tag), seleziona la tua versione (es. `release/7.0`).
+4. Naviga nelle cartelle: `misc` -> `snmptrap`.
+5. Clicca sul file `zabbix_trap_receiver.pl`.
+6. Clicca sul pulsante **"Raw"** (in alto a destra nel riquadro del codice) e copia l'URL della pagina.
+
+### Opzione B: Download diretto per Zabbix 7.0
+Usa questo comando per scaricarlo direttamente in `/usr/bin/`:
 ```bash
 sudo wget https://git.zabbix.com/projects/ZBX/repos/zabbix/raw/misc/snmptrap/zabbix_trap_receiver.pl?at=refs%2Fheads%2Frelease%2F7.0 -O /usr/bin/zabbix_trap_receiver.pl
-```
 
-Rendi lo script eseguibile:
-```bash
+# Rendilo eseguibile
 sudo chmod +x /usr/bin/zabbix_trap_receiver.pl
 ```
 
-*(Nota opzionale: se apri il file con un editor di testo, vedrai che di default scriverà le trap nel file `/tmp/zabbix_traps.tmp`. Puoi lasciare questo valore di default o modificarlo, ma se lo modifichi dovrai usare lo stesso percorso al Passo 4).*
+---
+
+## Passo 3: Configurazione del file temporaneo (Best Practice)
+
+Di default, lo script Perl scrive le trap in `/tmp/zabbix_traps.tmp`. In ambienti di produzione **NON** è consigliato usare `/tmp/` perché il file viene cancellato ai riavvii e potrebbe causare problemi con SELinux. Utilizzeremo `/var/log/zabbix/`.
+
+1. Crea il file e imposta i permessi corretti:
+   ```bash
+   sudo touch /var/log/zabbix/zabbix_traps.tmp
+   sudo chown zabbix:zabbix /var/log/zabbix/zabbix_traps.tmp
+   ```
+
+2. Modifica lo script Perl per puntare al nuovo file:
+   ```bash
+   sudo nano /usr/bin/zabbix_trap_receiver.pl
+   ```
+   Trova la variabile `$SNMPTrapperFile` (di solito nelle primissime righe) e modificala così:
+   ```perl
+   $SNMPTrapperFile = '/var/log/zabbix/zabbix_traps.tmp';
+   ```
 
 ---
 
-### Passo 3: Configurare `snmptrapd`
+## Passo 4: Configurazione di `snmptrapd`
 
-Devi istruire `snmptrapd` in modo che accetti le trap e le passi allo script Perl.
+Configuriamo il demone per accettare le trap e passarle allo script.
 
-1. Modifica il file di configurazione di `snmptrapd`:
+1. Apri il file di configurazione:
    ```bash
    sudo nano /etc/snmp/snmptrapd.conf
    ```
 
-2. Aggiungi le seguenti righe alla fine del file:
+2. Sostituisci o aggiungi il seguente contenuto:
    ```text
-   # Sostituisci "public" con la tua community SNMP reale, se diversa
+   # --- ESEMPIO SNMPv2c ---
+   # Sostituisci "public" con la tua vera stringa di community
    authCommunity log,execute,net public
-   
-   # Carica lo script perl di zabbix
+
+   # --- ESEMPIO SNMPv3 (Opzionale) ---
+   # createUser -e 0x0102030405 myuser SHA mypassword AES myprivpassword
+   # authUser log,execute,net myuser
+
+   # Formattazione per Zabbix (non rimuovere)
    perl do "/usr/bin/zabbix_trap_receiver.pl";
    ```
-   *Nota: se usi SNMPv3, dovrai configurare l'utente v3 con la direttiva `createUser` e `authUser` invece di `authCommunity`.*
 
 ---
 
-### Passo 4: Configurare Zabbix Server
+## Passo 5: Configurazione di Zabbix Server
 
-Ora devi dire a Zabbix Server di abilitare i processi "Trapper" e di dirgli dove andare a leggere il file creato dallo script Perl.
+Dobbiamo istruire Zabbix affinché legga il file che abbiamo appena configurato.
 
-1. Modifica il file di configurazione del server Zabbix:
+1. Apri il file del server:
    ```bash
    sudo nano /etc/zabbix/zabbix_server.conf
    ```
 
-2. Trova le seguenti voci, decommentale (togliendo il `#`) e impostale così:
-   ```text
+2. Trova le seguenti variabili, decommentale e impostale in questo modo:
+   ```ini
    StartSNMPTrapper=1
-   SNMPTrapperFile=/tmp/zabbix_traps.tmp
+   SNMPTrapperFile=/var/log/zabbix/zabbix_traps.tmp
    ```
 
----
-
-### Passo 5: Riavviare i servizi e configurare il Firewall
-
-1. Riavvia i servizi per applicare le modifiche e abilita `snmptrapd` all'avvio:
+3. Riavvia tutti i servizi e abilita l'avvio automatico:
    ```bash
    sudo systemctl restart snmptrapd zabbix-server
    sudo systemctl enable snmptrapd
    ```
 
-2. **Firewall:** Assicurati che la porta **162 UDP** sia aperta sul server Zabbix per ricevere le trap dai dispositivi.
-   - Su *ufw* (Ubuntu): `sudo ufw allow 162/udp`
-   - Su *firewalld* (RHEL/Rocky): `sudo firewall-cmd --add-port=162/udp --permanent && sudo firewall-cmd --reload`
+*(Ricorda di aprire la porta UDP 162 sul firewall del tuo server: `sudo ufw allow 162/udp` oppure `sudo firewall-cmd --add-port=162/udp --permanent && sudo firewall-cmd --reload`)*.
 
 ---
 
-### Passo 6: Configurazione nel Frontend di Zabbix 7.0
+## Passo 6: Configurazione nel Frontend Zabbix
 
-Affinché Zabbix associ la trap al dispositivo corretto, l'indirizzo IP da cui arriva la trap deve corrispondere all'IP configurato nell'Host in Zabbix.
+Affinché la trap non venga scartata come "Unmatched", l'IP sorgente della trap deve corrispondere all'IP dell'interfaccia SNMP configurata sull'Host in Zabbix.
 
-#### 6.1. Creare l'Host (o modificarne uno esistente)
-1. Vai su **Data collection -> Hosts**.
-2. Crea o apri l'Host di rete che ti invierà la trap.
-3. Nella sezione **Interfaces**, assicurati che ci sia un'interfaccia **SNMP** configurata. **L'indirizzo IP deve essere esattamente quello con cui il dispositivo si presenta al server**. (La porta può rimanere 161, Zabbix capirà comunque l'associazione).
-
-#### 6.2. Creare l'Item (Elemento) per raccogliere la Trap
-Per leggere la trap, devi creare un Item di tipo "SNMP trap".
-
-1. Vai negli **Items** di quell'Host e clicca su **Create item**.
-2. Compila i campi in questo modo:
-   - **Name**: Trap SNMP (Generico) o qualsiasi nome preferisci.
-   - **Type**: `SNMP trap`
-   - **Key**: `snmptrap.fallback` *(questa chiave cattura tutte le trap provenienti da questo IP non catturate da altre chiavi più specifiche)*.
-   - **Type of information**: `Log`
-   - **Log time format**: `hh:mm:ss yyyy/MM/dd` *(opzionale, aiuta Zabbix a parsare l'orario)*
-3. Clicca su **Add**.
-
-*Vuoi catturare una trap specifica anziché tutte?*
-Se vuoi filtrare solo un certo tipo di trap, ad esempio quando un link va giù, puoi usare come **Key** una regex, per esempio: `snmptrap["linkDown"]` oppure `snmptrap["1.3.6.1.4.1.9.9.43"]`.
+1. Vai su **Data collection** -> **Hosts**.
+2. Apri (o crea) il tuo Host. Nella sezione **Interfaces**, assicurati che ci sia un'interfaccia di tipo **SNMP** con l'indirizzo IP identico a quello del dispositivo mittente.
+3. Vai negli **Items** dell'Host e clicca su **Create item**:
+   * **Name**: `SNMP Traps Fallback` (o simili)
+   * **Type**: `SNMP trap`
+   * **Key**: `snmptrap.fallback` *(cattura tutte le trap di questo IP. Se vuoi catturare solo trap specifiche usa le regex, es: `snmptrap["linkDown"]`)*
+   * **Type of information**: `Log`
+   * **Log time format**: `hh:mm:ss yyyy/MM/dd` *(utile per il parsing esatto della data)*
+4. Salva.
 
 ---
 
-### Passo 7: Testare il funzionamento
+## 🧪 Metodi di Test
 
-Per testare se tutto funziona, puoi generare una trap finta dal tuo stesso server Zabbix (o da una macchina remota) e inviarla a `snmptrapd`.
+Per essere sicuri che la catena funzioni, ecco 3 step di test per isolare eventuali problemi.
 
-Esegui questo comando dal terminale del tuo server Zabbix:
+### Test 1: Test Locale (Generazione fittizia)
+Dal terminale del server Zabbix, lancia una trap verso localhost:
 ```bash
-snmptrap -v 2c -c public 127.0.0.1 "" 1.3.6.1.4.1.1.1.1 1.3.6.1.4.1.1.1.1 s "Test trap per Zabbix"
+snmptrap -v 2c -c public 127.0.0.1 "" 1.3.6.1.4.1.1.1.1 1.3.6.1.4.1.1.1.1 s "TEST_ZABBIX_LOCAL_TRAP"
 ```
+* **Verifica**: Controlla il file con `tail -n 15 /var/log/zabbix/zabbix_traps.tmp`. Dovresti vedere i dati grezzi contenenti la stringa "TEST_ZABBIX_LOCAL_TRAP". 
+* *Se non lo vedi, il problema è tra `snmptrapd` e lo script Perl.*
 
-**Come verificare che sia andata a buon fine:**
-1. Controlla il file temporaneo:
-   ```bash
-   cat /tmp/zabbix_traps.tmp
-   ```
-   *Se vedi del testo formattato contenente "Test trap per Zabbix", significa che `snmptrapd` e lo script Perl stanno lavorando perfettamente!*
+### Test 2: Verifica della ricezione di rete (`tcpdump`)
+Se la trap parte da un router remoto ma non arriva, controlla se il traffico raggiunge il server:
+```bash
+sudo apt install tcpdump  # o dnf install tcpdump
+sudo tcpdump -i any udp port 162
+```
+Forza il tuo apparato di rete a inviare una trap. Sul terminale dovresti vedere i pacchetti in arrivo. 
+* *Se non li vedi, il problema è il firewall di rete o del server.*
 
-2. Vai nel frontend di Zabbix: **Monitoring -> Latest data**. Cerca l'Host e l'Item `snmptrap.fallback` che hai creato. Dovresti vedere il testo della trap appena inviata.
+### Test 3: Verifica sul Frontend Zabbix
+Se Test 1 e Test 2 funzionano:
+1. Vai su **Monitoring** -> **Latest data** nel frontend di Zabbix.
+2. Filtra per il tuo Host.
+3. Controlla l'Item `SNMP Traps Fallback`.
+4. Se vedi i dati, la configurazione è **perfetta**. 
 
 ---
 
-### ⚠️ Risoluzione dei problemi frequenti
-* **Il file `/tmp/zabbix_traps.tmp` non viene creato**: Assicurati che in `snmptrapd.conf` ci sia la community corretta (`authCommunity ... public`).
-* **SELinux (su RHEL/Rocky Linux)**: SELinux spesso blocca lo script Perl o la scrittura in `/tmp`. Per verificare se SELinux sta bloccando qualcosa, imposta temporaneamente `setenforce 0` e riprova. Se funziona, dovrai creare una policy SELinux ad-hoc o cambiare la directory del trap file in un percorso gradito a SELinux (es. `/var/lib/zabbix/snmptraps/`).
-* **Traps in "Unmatched traps"**: Se le trap vengono scritte nel file `/tmp/zabbix_traps.tmp` ma su Zabbix non le vedi assegnate al tuo Host, vai a vedere il log di zabbix (`/var/log/zabbix/zabbix_server.log`). Probabilmente vedrai un messaggio `unmatched trap received from [192.168.x.x]`. Questo significa che l'IP `192.168.x.x` non è configurato su nessuna interfaccia SNMP in nessun Host Zabbix. Correggi l'IP sull'Host nel frontend.
+## 🚑 Troubleshooting Avanzato
+
+* **Vedo le trap nel file di testo, ma non su Zabbix (Latest Data):**
+  Guarda il log del server Zabbix:
+  ```bash
+  tail -f /var/log/zabbix/zabbix_server.log
+  ```
+  Se vedi il messaggio `unmatched trap received from[192.168.x.x]`, significa che Zabbix non sa a chi assegnare la trap. Assicurati che l'IP 192.168.x.x sia configurato come interfaccia SNMP in uno degli Host.
+
+* **Nessun file viene creato o permission denied:**
+  Se usi RedHat/AlmaLinux/Rocky, **SELinux** bloccherà di default `snmptrapd` dal creare/scrivere file e dall'eseguire script Perl.
+  *Per testare se è SELinux:* esegui `sudo setenforce 0` e lancia il *Test 1*. Se funziona, devi creare un'eccezione SELinux:
+  ```bash
+  # Ripristina SELinux
+  sudo setenforce 1
+  # Dai il contesto corretto al file log e allo script
+  sudo semanage fcontext -a -t zabbix_log_t "/var/log/zabbix(/.*)?"
+  sudo restorecon -Rv /var/log/zabbix/
+  # Permetti a snmptrapd di eseguire operazioni specifiche
+  sudo setsebool -P zabbix_can_network 1
+  ```
+  *(Nota: Se SELinux continua a bloccare il demone, controlla i log di audit con `sudo ausearch -m avc -ts recent` e usa `audit2allow` per creare la policy).*
+
+* **Formattazione delle trap incomprensibile (solo numeri OID):**
+  Se al posto di `linkDown` vedi solo numeri come `1.3.6.1.4.1.x.x...`, manca il MIB corrispondente. Installa il pacchetto MIB (`snmp-mibs-downloader`) o posiziona i file MIB dei tuoi vendor nella cartella `/usr/share/snmp/mibs/` e riavvia `snmptrapd`.
+
+---
+*Ti è stata utile questa guida? Lascia una ⭐ al repository!*
